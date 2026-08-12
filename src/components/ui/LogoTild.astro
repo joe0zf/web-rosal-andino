@@ -1,0 +1,185 @@
+---
+import rosalAndinoLogo from '../../assets/logo-rosal-andino.svg';
+export interface Props {
+  class?: string
+}
+
+const { class: className = '' } = Astro.props
+---
+
+<div class={`tilt-wrapper mx-auto ${className}`} data-tilt-wrapper>
+  <div
+    class="tilt-card group relative w-[220px] aspect-[3/3] overflow-hidden rounded-2xl bg-transparent p-0 will-change-transform"
+    data-tilt-card
+  >
+    {/* Contenido de la tarjeta */}
+    <div class="relative z-10 flex h-full items-center justify-center text-center">
+      <div class="metal-plate relative max-w-[320px]">
+        {/* Capa base: el logo "grabado" en metal (con relieve, sin perder el color) */}
+        <img
+          src={rosalAndinoLogo.src}
+          alt="logo"
+          class="metal-plate-base block w-full transition-all duration-500"
+        />
+
+        {/* Capa de brillo, recortada (masked) a la silueta exacta del logo.
+            Es el ÚNICO elemento que recibe el brillo ahora. */}
+        <div
+          class="metal-plate-sheen pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300"
+          style={`-webkit-mask-image:url(${rosalAndinoLogo.src}); mask-image:url(${rosalAndinoLogo.src}); -webkit-mask-size:contain; mask-size:contain; -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; -webkit-mask-position:center; mask-position:center;`}
+          data-metal-sheen
+        >
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .tilt-wrapper {
+    perspective: 900px;
+  }
+
+  .tilt-card {
+    transform-style: preserve-3d;
+    transform: rotateY(0deg) rotateX(0deg);
+    transition: transform 0.6s cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  /* Mientras se está moviendo el puntero, transición corta para que
+     siga al mouse sin "arrastre"; ver script para el toggle. */
+  .tilt-card[data-tracking='true'] {
+    transition: transform 0.08s linear;
+  }
+
+  /* --- Placa metálica --- */
+
+  /* Base: mantiene el color original del logo, solo le sube un poco
+     el contraste/saturación y agrega un bisel con drop-shadow
+     claro/oscuro para dar volumen, como si estuviera grabado en
+     relieve sobre una placa esmaltada (sin quitarle el color). */
+  .metal-plate-base {
+    filter: saturate(1.15) contrast(1.1) brightness(1.02)
+      drop-shadow(-1px -1px 0.5px rgba(255, 255, 255, 0.65))
+      drop-shadow(1px 1px 0.5px rgba(0, 0, 0, 0.45));
+  }
+
+  /* Brillo tipo "foco": un círculo de luz centrado en la posición
+     del puntero (--mx/--my, seteadas en JS sobre .tilt-card y
+     heredadas por cascada), recortado a la silueta exacta del logo
+     vía mask-image. mix-blend-mode: soft-light aporta el destello
+     de "vidrio/esmalte" sin quemar el color a blanco. */
+  .metal-plate-sheen {
+    background: radial-gradient(
+      circle 140px at var(--mx, 50%) var(--my, 50%),
+      rgba(255, 255, 255, 0.95),
+      rgba(255, 255, 255, 0.35) 45%,
+      transparent 75%
+    );
+    mix-blend-mode: soft-light;
+  }
+</style>
+
+<script>
+  function initTilt(wrapper: HTMLElement) {
+    const card = wrapper.querySelector<HTMLElement>('[data-tilt-card]')
+    // Ahora el brillo solo vive en el SVG (metal-sheen), ya no hay
+    // una capa de glare para toda la card.
+    const shineLayers = wrapper.querySelectorAll<HTMLElement>('[data-metal-sheen]')
+    if (!card || shineLayers.length === 0) return
+
+    let isTouching = false
+    const MAX_TILT = 16 // grados máximos de inclinación
+
+    const setShineOpacity = (value: number) => {
+      shineLayers.forEach((layer) => {
+        layer.style.opacity = String(value)
+      })
+    }
+
+    const applyTilt = (clientX: number, clientY: number) => {
+      const rect = card.getBoundingClientRect()
+      const centerX = rect.left + rect.width / 2
+      const centerY = rect.top + rect.height / 2
+
+      // Posición relativa (-1 a 1) respecto al centro de la tarjeta
+      const relX = (clientX - centerX) / (rect.width / 2)
+      const relY = (clientY - centerY) / (rect.height / 2)
+
+      const deltaX = Math.max(-1, Math.min(1, relX)) * MAX_TILT
+      const deltaY = Math.max(-1, Math.min(1, relY)) * MAX_TILT
+
+      card.style.transform = `rotateY(${deltaX}deg) rotateX(${-deltaY}deg)`
+
+      // Posición del puntero dentro de la tarjeta, en %.
+      const px = ((clientX - rect.left) / rect.width) * 100
+      const py = ((clientY - rect.top) / rect.height) * 100
+
+      // El foco de luz se posiciona en el lado OPUESTO al puntero.
+      // Físicamente tiene más sentido: al inclinar la superficie
+      // hacia un lado, el reflejo de la luz se corre hacia el lado
+      // contrario (como el brillo de una moneda al girarla), en vez
+      // de quedar pegado al cursor, que se siente más artificial.
+      const glareX = 100 - px
+      const glareY = 100 - py
+
+      // Se setea en .tilt-card (el ancestro) para que --mx/--my
+      // cascadeen hacia la capa de brillo del logo.
+      card.style.setProperty('--mx', `${glareX}%`)
+      card.style.setProperty('--my', `${glareY}%`)
+    }
+
+    const resetTilt = () => {
+      card.dataset.tracking = 'false'
+      card.style.transform = 'rotateY(0deg) rotateX(0deg)'
+      setShineOpacity(0)
+    }
+
+    // --- Mouse ---
+    card.addEventListener('mouseenter', () => {
+      if (isTouching) return
+      card.dataset.tracking = 'true'
+      setShineOpacity(1)
+    })
+
+    card.addEventListener('mousemove', (event) => {
+      if (isTouching) return
+      applyTilt(event.clientX, event.clientY)
+    })
+
+    card.addEventListener('mouseleave', () => {
+      if (isTouching) return
+      resetTilt()
+    })
+
+    // --- Touch ---
+    card.addEventListener(
+      'touchstart',
+      (event) => {
+        isTouching = true
+        card.dataset.tracking = 'true'
+        setShineOpacity(1)
+        const touch = event.touches[0]
+        applyTilt(touch.clientX, touch.clientY)
+      },
+      { passive: true }
+    )
+
+    card.addEventListener(
+      'touchmove',
+      (event) => {
+        if (!isTouching) return
+        const touch = event.touches[0]
+        applyTilt(touch.clientX, touch.clientY)
+      },
+      { passive: true }
+    )
+
+    card.addEventListener('touchend', () => {
+      isTouching = false
+      resetTilt()
+    })
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-tilt-wrapper]').forEach(initTilt)
+</script>

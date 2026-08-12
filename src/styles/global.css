@@ -1,0 +1,7 @@
+@import url('https://fonts.googleapis.com/css2?family=Luxurious+Script&family=Monda:wght@400..700&display=swap');
+@import "tailwindcss";
+@theme {
+  --color-bgmain: #151515;
+  --font-luxurious: "Luxurious Script", cursive;
+  --font-monda: "Monda", sans-serif;
+}

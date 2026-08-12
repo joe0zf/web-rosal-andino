@@ -1,0 +1,226 @@
+---
+import rosalAndinoLogo from '../../assets/logo-rosal-andino.svg';
+import lazoRosalAndino from '../../assets/lazo-rosal-andino.webp';
+import background from '../../assets/background.svg';
+import sampleAudio from '../../assets/audio/sample.mp3';
+import { Icon } from 'astro-icon/components';
+import NavBar from './NavBar.astro';
+import LogoTild from '../ui/LogoTild.astro';
+import TheaterCurtains from '../ui/TheaterCurtains.astro'
+
+// Partículas del resplandor: posición, delay y duración distintos
+// para que no se muevan todas "en sincro" (se ve más orgánico).
+// Ahora viven acá, en el padre, con recorridos más largos porque
+// tienen todo el alto del hero para moverse, no solo 220px.
+const particles = [
+  { x: '30%', delay: '0s', duration: '7s', size: '3px' },
+  { x: '42%', delay: '1.4s', duration: '8.2s', size: '4px' },
+  { x: '50%', delay: '0.6s', duration: '6.5s', size: '2.5px' },
+  { x: '58%', delay: '2.4s', duration: '8.8s', size: '3.5px' },
+  { x: '66%', delay: '1s', duration: '7.4s', size: '3px' },
+  { x: '38%', delay: '3.2s', duration: '9s', size: '2.5px' },
+  { x: '54%', delay: '2s', duration: '6.8s', size: '4px' },
+  { x: '46%', delay: '4s', duration: '7.6s', size: '3px' },
+  { x: '46%', delay: '4s', duration: '7.6s', size: '3px' },
+  { x: '46%', delay: '4s', duration: '7.6s', size: '3px' },
+]
+---
+
+<main
+  class="relative flex items-center md:justify-between justify-center w-full h-screen bg-bgmain overflow-hidden"
+>
+  <div 
+  class="hidden md:block w-60 h-screen bg-cover bg-center ml-12 scale-x-120"
+  style={`background-image: url(${lazoRosalAndino.src})`}
+  ></div>
+  <div class="relative z-10 flex flex-col justify-center items-center">
+    <button id="audio-toggle" type="button" class="p-2 rounded-full bg-gray-600 inline-flex items-center justify-center cursor-pointer" aria-pressed="false">
+      <Icon name="lucide:volume-2" class="w-5 h-5 text-white icon-play" />
+      <Icon name="lucide:pause" class="w-5 h-5 text-white icon-pause hidden" />
+    </button>
+    <audio id="sikuri-audio" src={sampleAudio} preload="none"></audio>
+    <span class="text-gray-300 text-6xl font-luxurious">Sikuris</span>
+
+    {/* Contenedor relativo del logo: acá "cuelgan" el resplandor y
+        las partículas, con overflow visible para que se derramen
+        fuera del cuadrado de 70x70 sin que nada las recorte. */}
+    <div class="relative w-70 h-70 flex items-center justify-center">
+      {/* Resplandor rojo animado, detrás y más grande que el logo */}
+      <div class="glow-red pointer-events-none absolute left-1/2 top-1/2 z-0" aria-hidden="true">
+      </div>
+
+      {/* Partículas flotando alrededor del resplandor */}
+      <div class="particles pointer-events-none absolute inset-0 z-0" aria-hidden="true">
+        {particles.map((p) => (
+          <span
+            class="particle"
+            style={`--x:${p.x}; --delay:${p.delay}; --duration:${p.duration}; --size:${p.size};`}
+          />
+        ))}
+      </div>
+
+      <div class="group relative z-10 w-full h-full flex items-center justify-center simple-rotat" >
+        <LogoTild/>
+      </div>
+    </div>
+
+    <h1 class="text-gray-300 text-6xl text-center font-luxurious pb-10">Sentimiento Rosal Andino <br>Cabana</h1>
+    <div class="hidden md:block">
+      <NavBar/>
+    </div>
+  </div>
+  <div 
+  class="hidden md:block w-60 h-screen bg-cover bg-center scale-x-120 rotate-180 mr-12"
+  style={`background-image: url(${lazoRosalAndino.src})`}
+  ></div>
+
+  <!-- Mobile: menu button top-right -->
+  <button id="mobile-menu-btn" class="md:hidden absolute top-4 right-4 p-2 rounded-full bg-gray-700 text-white z-20">
+    <Icon name="lucide:menu" class="w-6 h-6" />
+  </button>
+
+  <!-- Mobile decorative accents bottom-left (subtle, diagonal) -->
+  
+  <div class="md:hidden fixed bottom-[-200px] left-12 w-50 h-150 bg-cover bg-center -rotate-45 opacity-80 z-0 pointer-events-none" style={`background-image: url(${lazoRosalAndino.src})`}></div>
+</main>
+
+<style>
+  /* --- Resplandor rojo --- */
+  /* Bastante más grande que el logo (que vive en un cuadrado de
+     ~280px / w-70) para que se sienta como un aura ambiental del
+     hero y no como un círculo pegado al ícono. */
+  .glow-red {
+    width: 300px;
+    height: 300px;
+    max-width: none;
+    max-height: none;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle,
+      rgba(255, 45, 45, 0.45) 0%,
+      rgba(255, 20, 20, 0.22) 40%,
+      transparent 70%
+    );
+    filter: blur(60px);
+    /* El centrado se hace con translate(-50%, -50%) a partir de
+       left/top: 50%. Importante: como la animación también anima
+       "transform", cada keyframe de abajo tiene que repetir este
+       mismo translate junto al scale — si un keyframe solo pusiera
+       "scale(...)", pisaría el translate y el resplandor "saltaría"
+       a la esquina superior izquierda del contenedor. */
+    transform: translate(-50%, -50%) scale(1);
+    /* animation: glow-pulse 5s ease-in-out infinite; */
+  }
+
+  @keyframes glow-pulse {
+    0%,
+    100% {
+      transform: translate(-50%, -50%) scale(0.92);
+      opacity: 0.7;
+    }
+    50% {
+      transform: translate(-50%, -50%) scale(1.02);
+      opacity: 1;
+    }
+  }
+
+  /* --- Partículas --- */
+  /* overflow visible + recorrido más largo (translateY) porque acá
+     tienen todo el alto del hero para moverse, no solo la card. */
+  .particles {
+    overflow: visible;
+  }
+
+  .particle {
+    position: absolute;
+    left: var(--x, 50%);
+    bottom: 20%;
+    width: var(--size, 3px);
+    height: var(--size, 3px);
+    border-radius: 50%;
+    background: radial-gradient(
+      circle,
+      rgba(255, 255, 255, 0.95),
+      rgba(255, 70, 70, 0.75) 55%,
+      transparent 100%
+    );
+    box-shadow: 0 0 8px 2px rgba(255, 60, 60, 0.5);
+    opacity: 0;
+    animation: particle-float var(--duration, 7s) ease-in-out infinite;
+    animation-delay: var(--delay, 0s);
+  }
+
+  @keyframes particle-float {
+    0% {
+      transform: translateY(0) scale(0.5);
+      opacity: 0;
+    }
+    15% {
+      opacity: 1;
+    }
+    75% {
+      opacity: 0.6;
+    }
+    100% {
+      transform: translateY(-220px) scale(1);
+      opacity: 0;
+    }
+  }
+
+  .simple-rotate {
+    transform-style: preserve-3d;
+    animation: simplerotate 7s linear infinite alternate;
+  }
+
+  @keyframes simplerotate {
+    from {
+      transform: rotate3d(0, 1, 0, -40deg);
+    }
+
+    to {
+      transform: rotate3d(0, 1, 0, 40deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .glow-red {
+      animation: none;
+      opacity: 0.8;
+    }
+    .particle {
+      animation: none;
+      opacity: 0;
+    }
+  }
+</style>
+
+<script type="module">
+  const btn = document.getElementById('audio-toggle');
+  const audio = document.getElementById('sikuri-audio');
+  if (btn && audio) {
+    const iconPlay = btn.querySelector('.icon-play');
+    const iconPause = btn.querySelector('.icon-pause');
+    btn.addEventListener('click', async () => {
+      try {
+        if (audio.paused) {
+          await audio.play();
+          iconPlay.classList.add('hidden');
+          iconPause.classList.remove('hidden');
+          btn.setAttribute('aria-pressed', 'true');
+        } else {
+          audio.pause();
+          iconPlay.classList.remove('hidden');
+          iconPause.classList.add('hidden');
+          btn.setAttribute('aria-pressed', 'false');
+        }
+      } catch (err) {
+        console.error('Audio play failed', err);
+      }
+    });
+    audio.addEventListener('ended', () => {
+      iconPlay.classList.remove('hidden');
+      iconPause.classList.add('hidden');
+      btn.setAttribute('aria-pressed', 'false');
+    });
+  }
+</script>

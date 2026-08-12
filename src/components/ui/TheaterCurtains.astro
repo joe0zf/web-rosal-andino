@@ -1,0 +1,456 @@
+---
+/**
+ * TheaterCurtains.astro
+ * ----------------------
+ * Overlay animado (Three.js) que se monta ENCIMA del layout normal
+ * al cargar la página: dos paños de tela simulados (Verlet /
+ * mass-spring), arrancan "cerrados" cubriendo el centro y se abren
+ * como un telón real, con pliegues y asentamiento físico, hasta
+ * terminar exactamente en la posición de tus bandas laterales
+ * estáticas actuales (`w-60 ...`). Cuando termina, el canvas se
+ * desvanece y lo que queda debajo es tu diseño de siempre — no hay
+ * WebGL corriendo el resto de la vida de la página.
+ *
+ * Uso: colócalo UNA vez, justo dentro de <main>, junto a tus divs
+ * decorativos de siempre (no los reemplaza, se superpone):
+ *
+ *   <TheaterCurtains leftSrc={lazoRosalAndino} rightSrc={lazoRosalAndino} />
+ *
+ * Requiere: npm install three
+ */
+
+export interface Props {
+  leftSrc: ImageMetadata | string
+  rightSrc: ImageMetadata | string
+  fabricWidth?: number // ancho de la franja en px, debe calzar con tu w-60 actual (240px)
+  durationMs?: number
+}
+
+const {
+  leftSrc,
+  rightSrc,
+  fabricWidth = 240,
+  durationMs = 2200
+} = Astro.props
+
+const leftUrl = typeof leftSrc === 'string' ? leftSrc : leftSrc.src
+const rightUrl = typeof rightSrc === 'string' ? rightSrc : rightSrc.src
+---
+
+<div id="curtains-overlay" class="hidden md:block" data-fabric-width={fabricWidth} data-duration={durationMs}>
+  <canvas
+    class="curtain-canvas pointer-events-none fixed inset-y-0 left-0 z-50 h-screen w-1/2"
+    data-side="left"
+    data-src={leftUrl}
+  ></canvas>
+  <canvas
+    class="curtain-canvas pointer-events-none fixed inset-y-0 right-0 z-50 h-screen w-1/2"
+    data-side="right"
+    data-src={rightUrl}
+  ></canvas>
+</div>
+
+<style>
+  .curtain-canvas {
+    display: block;
+    opacity: 1;
+    transition: opacity 0.6s ease;
+  }
+  .curtain-canvas[data-finished='true'] {
+    opacity: 0;
+  }
+</style>
+
+<script>
+  import * as THREE from 'three'
+
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  function supportsWebGL() {
+    try {
+      const c = document.createElement('canvas')
+      return !!(window.WebGLRenderingContext && (c.getContext('webgl') || c.getContext('experimental-webgl')))
+    } catch {
+      return false
+    }
+  }
+
+  const overlay = document.getElementById('curtains-overlay')
+
+  // Si el usuario prefiere menos movimiento, o el navegador no
+  // soporta WebGL, o estamos en mobile (el overlay ya es
+  // `hidden md:block`), no molestamos: simplemente no montamos nada
+  // y se ve directo tu diseño estático de siempre.
+  if (overlay && !prefersReducedMotion && supportsWebGL()) {
+    const fabricWidth = Number(overlay.dataset.fabricWidth || 240)
+    const durationMs = Number(overlay.dataset.duration || 2200)
+
+    // Filas y columnas de la malla de tela. Más columnas = pliegues
+    // verticales más finos; más filas = más "cuerpo" en el balanceo.
+    const COLS = 10
+    const ROWS = 16
+
+    const GRAVITY = 340 // px/s², bastante leve: es tela liviana, no una cortina de terciopelo pesado
+    const DAMPING = 0.985 // amortiguación del Verlet (frena la energía con el tiempo)
+    const CONSTRAINT_ITERATIONS = 5
+    const WIND_STRENGTH = 55 // px/s², ondulación orgánica durante la apertura
+
+    class ClothCurtain {
+      canvas: HTMLCanvasElement
+      side: 'left' | 'right'
+
+      renderer: THREE.WebGLRenderer
+      scene: THREE.Scene
+      camera: THREE.OrthographicCamera
+      mesh: THREE.Mesh
+      geometry: THREE.BufferGeometry
+
+      trackWidth = 0
+      trackHeight = 0
+
+      // Estado físico: arrays planos (x,y,z) para posición actual y
+      // anterior (Verlet), más un flag de "anclado" por partícula.
+      px: Float32Array
+      py: Float32Array
+      pz: Float32Array
+      ox: Float32Array
+      oy: Float32Array
+      oz: Float32Array
+      pinned: Uint8Array
+      restLocalX: Float32Array
+      restLocalY: Float32Array
+
+      constraints: Array<[number, number, number]> = [] // [i, j, restLength]
+
+      startEdgeX: number
+      endEdgeX: number
+      startTime = 0
+      finished = false
+      settleFrames = 0
+
+      constructor(canvas: HTMLCanvasElement, side: 'left' | 'right', textureUrl: string) {
+        this.canvas = canvas
+        this.side = side
+
+        const rect = canvas.getBoundingClientRect()
+        this.trackWidth = Math.max(rect.width, fabricWidth + 40)
+        this.trackHeight = rect.height
+
+        // "Cerrado": el paño cubre hacia el centro. "Abierto": el
+        // paño descansa pegado al borde de pantalla, tal cual tu
+        // diseño estático actual.
+        if (side === 'left') {
+          this.startEdgeX = this.trackWidth - fabricWidth
+          this.endEdgeX = 0
+        } else {
+          this.startEdgeX = 0
+          this.endEdgeX = this.trackWidth - fabricWidth
+        }
+
+        const n = COLS * ROWS
+        this.px = new Float32Array(n)
+        this.py = new Float32Array(n)
+        this.pz = new Float32Array(n)
+        this.ox = new Float32Array(n)
+        this.oy = new Float32Array(n)
+        this.oz = new Float32Array(n)
+        this.pinned = new Uint8Array(n)
+        this.restLocalX = new Float32Array(n)
+        this.restLocalY = new Float32Array(n)
+
+        this.buildParticles()
+        this.buildConstraints()
+
+        this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+        this.renderer.setSize(this.trackWidth, this.trackHeight, false)
+
+        this.scene = new THREE.Scene()
+        this.camera = new THREE.OrthographicCamera(0, this.trackWidth, 0, -this.trackHeight, 0.1, 2000)
+        this.camera.position.z = 800
+
+        this.scene.add(new THREE.AmbientLight(0xffffff, 0.55))
+        const key = new THREE.DirectionalLight(0xffffff, 0.9)
+        key.position.set(side === 'left' ? 250 : -250, 300, 400)
+        this.scene.add(key)
+
+        this.geometry = this.buildGeometry()
+
+        const texture = new THREE.TextureLoader().load(textureUrl)
+        texture.colorSpace = THREE.SRGBColorSpace
+
+        const material = new THREE.MeshStandardMaterial({
+          map: texture,
+          side: THREE.DoubleSide,
+          roughness: 0.85,
+          metalness: 0.05
+        })
+
+        this.mesh = new THREE.Mesh(this.geometry, material)
+        this.scene.add(this.mesh)
+
+        this.startTime = performance.now()
+      }
+
+      buildParticles() {
+        const colSpacing = fabricWidth / (COLS - 1)
+        const rowSpacing = this.trackHeight / (ROWS - 1)
+
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const i = r * COLS + c
+            const x = this.startEdgeX + c * colSpacing
+            const y = -r * rowSpacing // fila 0 = arriba (y=0), última fila = abajo
+
+            this.px[i] = x
+            this.py[i] = y
+            this.pz[i] = 0
+            this.ox[i] = x
+            this.oy[i] = y
+            this.oz[i] = 0
+            this.restLocalX[i] = c * colSpacing
+            this.restLocalY[i] = y
+            this.pinned[i] = r === 0 ? 1 : 0 // solo la fila superior va "clavada a la varilla"
+          }
+        }
+      }
+
+      buildConstraints() {
+        const dist = (i: number, j: number) => {
+          const dx = this.px[i] - this.px[j]
+          const dy = this.py[i] - this.py[j]
+          const dz = this.pz[i] - this.pz[j]
+          return Math.sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const i = r * COLS + c
+            if (c < COLS - 1) {
+              const j = i + 1
+              this.constraints.push([i, j, dist(i, j)]) // estructural horizontal
+            }
+            if (r < ROWS - 1) {
+              const j = i + COLS
+              this.constraints.push([i, j, dist(i, j)]) // estructural vertical
+            }
+            if (c < COLS - 1 && r < ROWS - 1) {
+              const j = i + COLS + 1
+              this.constraints.push([i, j, dist(i, j)]) // diagonal (shear), evita colapsos raros
+              const k = i + 1
+              const l = i + COLS
+              this.constraints.push([k, l, dist(k, l)])
+            }
+          }
+        }
+      }
+
+      buildGeometry() {
+        const geometry = new THREE.BufferGeometry()
+        const position = new Float32Array(COLS * ROWS * 3)
+        const uv = new Float32Array(COLS * ROWS * 2)
+        const index: number[] = []
+
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const i = r * COLS + c
+            position[i * 3] = this.px[i]
+            position[i * 3 + 1] = this.py[i]
+            position[i * 3 + 2] = this.pz[i]
+            uv[i * 2] = c / (COLS - 1)
+            uv[i * 2 + 1] = 1 - r / (ROWS - 1)
+          }
+        }
+
+        for (let r = 0; r < ROWS - 1; r++) {
+          for (let c = 0; c < COLS - 1; c++) {
+            const a = r * COLS + c
+            const b = a + 1
+            const cIdx = a + COLS
+            const d = cIdx + 1
+            index.push(a, cIdx, b, b, cIdx, d)
+          }
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
+        geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+        geometry.setIndex(index)
+        geometry.computeVertexNormals()
+        return geometry
+      }
+
+      // Curva con leve rebote (overshoot) antes de asentarse — así el
+      // telón "pasa" un poco de su punto final y vuelve, como tela real.
+      easeOutBack(t: number) {
+        const c1 = 1.15
+        const c3 = c1 + 1
+        return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2)
+      }
+
+      step(dtSeconds: number, elapsedMs: number) {
+        const rawT = Math.min(1, elapsedMs / durationMs)
+        const eased = this.easeOutBack(rawT)
+        const edgeX = this.startEdgeX + (this.endEdgeX - this.startEdgeX) * eased
+
+        // Energía de viento: fuerte mientras se abre, se apaga después.
+        const windEnergy = Math.max(0, 1 - rawT * 1.1)
+        const t = elapsedMs / 1000
+
+        const n = COLS * ROWS
+        let maxSpeed = 0
+
+        for (let i = 0; i < n; i++) {
+          if (this.pinned[i]) {
+            // Fila anclada: sigue al "riel" de forma cinemática, no
+            // física — es lo único que se mueve "a mano", el resto
+            // de la tela reacciona a través de los constraints.
+            const c = i % COLS
+            this.ox[i] = this.px[i]
+            this.oy[i] = this.py[i]
+            this.px[i] = edgeX + this.restLocalX[i]
+            this.py[i] = this.restLocalY[i]
+            continue
+          }
+
+          const vx = (this.px[i] - this.ox[i]) * DAMPING
+          const vy = (this.py[i] - this.oy[i]) * DAMPING
+          const vz = (this.pz[i] - this.oz[i]) * DAMPING
+
+          const r = Math.floor(i / COLS)
+          const c = i % COLS
+          const wind = Math.sin(t * 1.7 + r * 0.55 + c * 0.35) * WIND_STRENGTH * windEnergy * dtSeconds
+
+          const nx = this.px[i] + vx + wind
+          const ny = this.py[i] + vy + GRAVITY * dtSeconds * dtSeconds
+          const nz = this.pz[i] + vz
+
+          this.ox[i] = this.px[i]
+          this.oy[i] = this.py[i]
+          this.oz[i] = this.pz[i]
+          this.px[i] = nx
+          this.py[i] = ny
+          this.pz[i] = nz
+
+          maxSpeed = Math.max(maxSpeed, Math.abs(vx) + Math.abs(vy))
+        }
+
+        for (let iter = 0; iter < CONSTRAINT_ITERATIONS; iter++) {
+          for (const [i, j, restLength] of this.constraints) {
+            const dx = this.px[j] - this.px[i]
+            const dy = this.py[j] - this.py[i]
+            const dz = this.pz[j] - this.pz[i]
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.0001
+            const diff = (dist - restLength) / dist
+            const iPinned = this.pinned[i]
+            const jPinned = this.pinned[j]
+            if (iPinned && jPinned) continue
+
+            const offsetX = dx * 0.5 * diff
+            const offsetY = dy * 0.5 * diff
+            const offsetZ = dz * 0.5 * diff
+
+            if (!iPinned && !jPinned) {
+              this.px[i] += offsetX
+              this.py[i] += offsetY
+              this.pz[i] += offsetZ
+              this.px[j] -= offsetX
+              this.py[j] -= offsetY
+              this.pz[j] -= offsetZ
+            } else if (iPinned) {
+              this.px[j] -= dx * diff
+              this.py[j] -= dy * diff
+              this.pz[j] -= dz * diff
+            } else {
+              this.px[i] += dx * diff
+              this.py[i] += dy * diff
+              this.pz[i] += dz * diff
+            }
+          }
+        }
+
+        // Pliegue visual: donde la tela se comprime horizontalmente
+        // respecto a su ancho de reposo, la empujamos un poco hacia
+        // la cámara — así los dobleces "abultan" en vez de verse planos.
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 1; c < COLS - 1; c++) {
+            const i = r * COLS + c
+            const left = i - 1
+            const right = i + 1
+            const restSpan = this.restLocalX[right] - this.restLocalX[left]
+            const currentSpan = this.px[right] - this.px[left]
+            const compression = Math.max(0, 1 - currentSpan / restSpan)
+            this.pz[i] = compression * 26
+          }
+        }
+
+        const posAttr = this.geometry.getAttribute('position') as THREE.BufferAttribute
+        for (let i = 0; i < n; i++) {
+          posAttr.setXYZ(i, this.px[i], this.py[i], this.pz[i])
+        }
+        posAttr.needsUpdate = true
+        this.geometry.computeVertexNormals()
+
+        if (rawT >= 1) {
+          if (maxSpeed < 0.05) {
+            this.settleFrames++
+          } else {
+            this.settleFrames = 0
+          }
+        }
+
+        return this.settleFrames > 40 || elapsedMs > durationMs + 3500 // watchdog de seguridad
+      }
+
+      dispose() {
+        this.renderer.dispose()
+        this.geometry.dispose()
+        ;(this.mesh.material as THREE.Material).dispose()
+      }
+    }
+
+    const curtains: ClothCurtain[] = []
+    document.querySelectorAll<HTMLCanvasElement>('.curtain-canvas').forEach((canvas) => {
+      const side = (canvas.dataset.side as 'left' | 'right') || 'left'
+      const src = canvas.dataset.src || ''
+      if (!src) return
+      curtains.push(new ClothCurtain(canvas, side, src))
+    })
+
+    let lastTime = performance.now()
+    let allFinished = false
+
+    function tick(now: number) {
+      const dt = Math.min(0.033, (now - lastTime) / 1000) // clamp para evitar saltos si la pestaña pierde foco
+      lastTime = now
+
+      let everyoneDone = true
+      for (const curtain of curtains) {
+        if (curtain.finished) continue
+        const done = curtain.step(dt, now - curtain.startTime)
+        curtain.renderer.render(curtain.scene, curtain.camera)
+        if (done) {
+          curtain.finished = true
+          curtain.canvas.dataset.finished = 'true'
+        } else {
+          everyoneDone = false
+        }
+      }
+
+      if (everyoneDone && !allFinished) {
+        allFinished = true
+        window.setTimeout(() => {
+          overlay.style.display = 'none'
+          curtains.forEach((c) => c.dispose())
+        }, 650) // deja correr la transición de opacidad del CSS antes de desmontar
+        return
+      }
+
+      requestAnimationFrame(tick)
+    }
+
+    requestAnimationFrame(tick)
+  } else if (overlay) {
+    // Sin animación: no mostramos el overlay, se ve directo el
+    // diseño estático que ya tienes.
+    overlay.style.display = 'none'
+  }
+</script>
