@@ -8,7 +8,7 @@ import NavBar from './NavBar.astro';
 import LogoTild from '../ui/LogoTild.astro';
 import TheaterCurtains from '../ui/TheaterCurtains.astro'
 import TextMesh from '../common/TextMesh.astro'
-
+import TextSilverShine from '../common/TextSilverShine.astro'
 // Partículas del resplandor: posición, delay y duración distintos
 // para que no se muevan todas "en sincro" (se ve más orgánico).
 // Ahora viven acá, en el padre, con recorridos más largos porque
@@ -40,8 +40,14 @@ const particles = [
       <Icon name="lucide:pause" class="w-5 h-5 text-white icon-pause hidden" />
     </button>
     <audio id="sikuri-audio" src={sampleAudio} preload="none"></audio>
-    <span class="text-gray-300 text-4xl md:text-6xl font-luxurious">Sikuris</span>
-
+    <!-- <span class="text-gray-300 text-4xl md:text-6xl font-luxurious">Sikuris</span> -->
+    <TextSilverShine
+      text="Sikuris"
+      fontFamily="Luxurious Script"
+      fontSize={60}
+      color="#c8ccd2"
+      interval={3}
+    />
     {/* Contenedor relativo del logo: acá "cuelgan" el resplandor y
         las partículas, con overflow visible para que se derramen
         fuera del cuadrado de 70x70 sin que nada las recorte. */}
@@ -65,9 +71,22 @@ const particles = [
       </div>
     </div>
     
-    <h1 class="text-gray-300 text-4xl md:text-6xl text-center font-luxurious pb-10">Sentimiento Rosal Andino <br>Cabana</h1>
+    <!-- <h1 class="text-gray-300 text-4xl md:text-6xl text-center font-luxurious pb-10">Sentimiento Rosal Andino <br>Cabana</h1> -->
      <!-- <TextMesh text="Sentimiento Rosal Andino" fontFamily="Luxurious Script" fontSize={50} /> -->
-     
+     <TextSilverShine
+      text="Sentimiento Rosal Andino"
+      fontFamily="Luxurious Script"
+      fontSize={60}
+      color="#c8ccd2"
+      interval={5}
+    />
+    <TextSilverShine
+      text="Cabana"
+      fontFamily="Luxurious Script"
+      fontSize={60}
+      color="#c8ccd2"
+      interval={5}
+    />
     <div class="hidden md:block">
       <NavBar/>
     </div>

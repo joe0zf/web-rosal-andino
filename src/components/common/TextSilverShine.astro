@@ -1,0 +1,420 @@
+---
+
+export interface Props {
+  text?: string
+  fontSize?: number
+  fontFamily?: string
+  color?: string
+  interval?: number
+  sweepDuration?: number
+  padding?: number
+  class?: string
+}
+
+const {
+  text = 'PLATEADO',
+  fontSize = 96,
+  fontFamily = 'Inter',
+  color = '#c8ccd2',
+  interval = 4,
+  sweepDuration = 3,
+  padding = 24,
+  class: className = ''
+} = Astro.props
+---
+
+<div
+  data-silver-text
+  data-text={text}
+  data-font-size={fontSize}
+  data-font-family={fontFamily}
+  data-color={color}
+  data-interval={interval}
+  data-sweep-duration={sweepDuration}
+  data-padding={padding}
+  class={`relative inline-block select-none ${className}`}
+>
+  <canvas data-silver-canvas class="block h-full w-full"></canvas>
+
+  {/* Fallback CSS puro: visible por defecto (SSR), se oculta si el
+      script logra montar WebGL. Así nunca hay un hueco en blanco. */}
+  <span
+    data-silver-fallback
+    class="silver-fallback-text block whitespace-nowrap bg-clip-text font-bold text-transparent"
+    style={`font-family:"${fontFamily}", sans-serif; font-size:${fontSize}px; background-image: linear-gradient(115deg, #6b6f76 0%, #f4f6f8 22%, #9a9ea5 45%, #ffffff 60%, #7d8189 78%, #eef0f2 100%);`}
+  >{text}</span>
+</div>
+
+<style>
+  [data-silver-text] {
+    line-height: 1;
+  }
+
+  [data-silver-canvas] {
+    display: none; /* se muestra vía JS solo si WebGL2 monta bien */
+  }
+
+  .silver-fallback-text {
+    /* Un poco de textura simulada solo con CSS para el fallback: un
+       segundo gradiente muy sutil por encima ayuda a que no se vea
+       100% plano, aunque claramente es más simple que la versión WebGL. */
+    filter: contrast(1.05);
+  }
+</style>
+
+<script>
+  function parseHexColor(hex: string): [number, number, number] {
+    let h = hex.trim().replace('#', '')
+    if (h.length === 3) {
+      h = h
+        .split('')
+        .map((c) => c + c)
+        .join('')
+    }
+    if (h.length < 6) return [0.79, 0.8, 0.82]
+    const r = parseInt(h.slice(0, 2), 16) / 255
+    const g = parseInt(h.slice(2, 4), 16) / 255
+    const b = parseInt(h.slice(4, 6), 16) / 255
+    return [r, g, b]
+  }
+
+  function clamp01(v: number) {
+    return Math.max(0, Math.min(1, v))
+  }
+
+  // A partir de un solo color, deriva un tono "claro" y uno "oscuro"
+  // para el degradado metálico base (el ruido en el shader mezcla
+  // entre estos dos, no es un gradiente lineal fijo).
+  function deriveMetalTones(base: [number, number, number]) {
+    const light: [number, number, number] = [
+      clamp01(base[0] * 1.35 + 0.08),
+      clamp01(base[1] * 1.35 + 0.08),
+      clamp01(base[2] * 1.35 + 0.08)
+    ]
+    const dark: [number, number, number] = [base[0] * 0.42, base[1] * 0.42, base[2] * 0.42]
+    return { light, dark }
+  }
+
+  const VERT_SRC = `#version 300 es
+    in vec2 aPos;
+    in vec2 aUv;
+    out vec2 vUv;
+    void main() {
+      vUv = aUv;
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  `
+
+  // Ruido simplex 2D (Ashima Arts, dominio público) — es lo que le
+  // da el grano "metal cepillado" en vez de un degradado plano.
+  const NOISE_GLSL = `
+    vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+    vec2 mod289(vec2 x){return x-floor(x*(1.0/289.0))*289.0;}
+    vec3 permute(vec3 x){return mod289(((x*34.0)+1.0)*x);}
+    float snoise(vec2 v){
+      const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                          -0.577350269189626, 0.024390243902439);
+      vec2 i  = floor(v + dot(v, C.yy));
+      vec2 x0 = v -   i + dot(i, C.xx);
+      vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+      vec4 x12 = x0.xyxy + C.xxzz;
+      x12.xy -= i1;
+      i = mod289(i);
+      vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0))
+              + i.x + vec3(0.0, i1.x, 1.0));
+      vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+      m = m*m; m = m*m;
+      vec3 x = 2.0 * fract(p * C.www) - 1.0;
+      vec3 h = abs(x) - 0.5;
+      vec3 ox = floor(x + 0.5);
+      vec3 a0 = x - ox;
+      m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+      vec3 g;
+      g.x  = a0.x * x0.x + h.x * x0.y;
+      g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+      return 130.0 * dot(m, g);
+    }
+    float fbm(vec2 p){
+      float total = 0.0;
+      float amp = 0.5;
+      for (int i = 0; i < 3; i++) {
+        total += snoise(p) * amp;
+        p *= 2.05;
+        amp *= 0.55;
+      }
+      return total;
+    }
+  `
+
+  const FRAG_SRC = `#version 300 es
+    precision highp float;
+
+    in vec2 vUv;
+    out vec4 outColor;
+
+    uniform sampler2D uTex;
+    uniform float uTime;
+    uniform float uInterval;
+    uniform float uSweepDuration;
+    uniform float uSweepWidth;
+    uniform float uReducedMotion;
+    uniform vec3 uColorDark;
+    uniform vec3 uColorLight;
+    uniform vec3 uHighlight;
+
+    ${NOISE_GLSL}
+
+    void main() {
+      vec4 tex = texture(uTex, vUv);
+      if (tex.a < 0.02) discard;
+
+      // --- Grano metálico orgánico ---
+      float grain = fbm(vUv * vec2(10.0, 6.0)) * 0.5 + 0.5;
+      float ambient = mix(0.3, 0.8, vUv.y);
+      float base = clamp(grain * 0.65 + ambient * 0.35, 0.0, 1.0);
+      vec3 silver = mix(uColorDark, uColorLight, base);
+
+      // --- Barrido periódico ---
+      float phase = mod(uTime, uInterval);
+      float rawT = phase / uSweepDuration;
+      float sweepT = smoothstep(0.0, 1.0, clamp(rawT, 0.0, 1.0));
+
+      float travel = 1.7;
+      float center = -0.35 + travel * sweepT;
+
+      // Eje diagonal del barrido, con una pizca de ruido para que el
+      // borde no sea una línea perfecta (más "orgánico").
+      float wobble = fbm(vUv * 5.0 + uTime * 0.05) * 0.05;
+      float diag = vUv.x * 0.55 + vUv.y * 0.45 + wobble;
+
+      float dist = abs(diag - center);
+      float band = smoothstep(uSweepWidth, 0.0, dist);
+      band *= step(rawT, 1.0);
+      band *= 1.0 - uReducedMotion;
+
+      vec3 color = silver + uHighlight * band * 1.4;
+      outColor = vec4(color * tex.a, tex.a);
+    }
+  `
+
+  function compile(gl: WebGL2RenderingContext, type: number, src: string) {
+    const shader = gl.createShader(type)
+    if (!shader) return null
+    gl.shaderSource(shader, src)
+    gl.compileShader(shader)
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error('SilverShineText shader error:', gl.getShaderInfoLog(shader))
+      gl.deleteShader(shader)
+      return null
+    }
+    return shader
+  }
+
+  function renderTextCanvas(
+    text: string,
+    fontFamily: string,
+    fontSize: number,
+    width: number,
+    height: number
+  ) {
+    const c = document.createElement('canvas')
+    c.width = width
+    c.height = height
+    const ctx = c.getContext('2d')
+    if (!ctx) return c
+    ctx.clearRect(0, 0, width, height)
+    ctx.fillStyle = '#ffffff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.font = `700 ${fontSize}px "${fontFamily}", sans-serif`
+    ctx.fillText(text, width / 2, height / 2)
+    return c
+  }
+
+  async function waitForFont(fontFamily: string, pxSize: number) {
+    try {
+      if (document.fonts?.load) {
+        await document.fonts.load(`700 ${pxSize}px "${fontFamily}"`)
+      }
+      if (document.fonts?.ready) {
+        await document.fonts.ready
+      }
+    } catch {
+      // seguimos con el fallback de fuente
+    }
+  }
+
+  function measureText(text: string, fontFamily: string, pxSize: number) {
+    const c = document.createElement('canvas')
+    const ctx = c.getContext('2d')
+    if (!ctx) return { width: pxSize * text.length * 0.6, height: pxSize * 1.2 }
+    ctx.font = `700 ${pxSize}px "${fontFamily}", sans-serif`
+    const m = ctx.measureText(text)
+    const ascent = m.actualBoundingBoxAscent ?? pxSize * 0.8
+    const descent = m.actualBoundingBoxDescent ?? pxSize * 0.25
+    return { width: m.width, height: ascent + descent }
+  }
+
+  function supportsWebGL2() {
+    try {
+      const c = document.createElement('canvas')
+      return !!c.getContext('webgl2')
+    } catch {
+      return false
+    }
+  }
+
+  async function initOne(wrapper: HTMLElement) {
+    const canvas = wrapper.querySelector<HTMLCanvasElement>('[data-silver-canvas]')
+    const fallback = wrapper.querySelector<HTMLElement>('[data-silver-fallback]')
+    if (!canvas || !fallback) return
+
+    const text = wrapper.dataset.text || 'PLATEADO'
+    const fontFamily = wrapper.dataset.fontFamily || 'Inter'
+    const fontSize = Number(wrapper.dataset.fontSize) || 96
+    const baseColorHex = wrapper.dataset.color || '#c8ccd2'
+    const interval = Number(wrapper.dataset.interval) || 4
+    const sweepDuration = Number(wrapper.dataset.sweepDuration) || 1.1
+    const padding = Number(wrapper.dataset.padding) || 24
+
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+    if (!supportsWebGL2()) {
+      // Sin WebGL2: dejamos el fallback CSS visible tal cual está y no hacemos nada más.
+      return
+    }
+
+    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: true })
+    if (!gl) return
+
+    // --- Tamaño según el texto ---
+    await waitForFont(fontFamily, fontSize)
+    const { width: textW, height: textH } = measureText(text, fontFamily, fontSize)
+    const cssWidth = Math.ceil(textW + padding * 2)
+    const cssHeight = Math.ceil(textH + padding * 2)
+    wrapper.style.width = `${cssWidth}px`
+    wrapper.style.height = `${cssHeight}px`
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    const pxWidth = Math.max(2, Math.round(cssWidth * dpr))
+    const pxHeight = Math.max(2, Math.round(cssHeight * dpr))
+    canvas.width = pxWidth
+    canvas.height = pxHeight
+    gl.viewport(0, 0, pxWidth, pxHeight)
+
+    // --- Shaders / programa ---
+    const vs = compile(gl, gl.VERTEX_SHADER, VERT_SRC)
+    const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG_SRC)
+    if (!vs || !fs) return
+    const program = gl.createProgram()
+    if (!program) return
+    gl.attachShader(program, vs)
+    gl.attachShader(program, fs)
+    gl.linkProgram(program)
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error('SilverShineText program error:', gl.getProgramInfoLog(program))
+      return
+    }
+
+    // --- Geometría: un solo quad, sin grid (no hay física acá) ---
+    const positions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1])
+    const uvs = new Float32Array([0, 1, 1, 1, 0, 0, 1, 0])
+    const indices = new Uint16Array([0, 1, 2, 2, 1, 3])
+
+    const vao = gl.createVertexArray()
+    gl.bindVertexArray(vao)
+
+    const posLoc = gl.getAttribLocation(program, 'aPos')
+    const posBuf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf)
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW)
+    gl.enableVertexAttribArray(posLoc)
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0)
+
+    const uvLoc = gl.getAttribLocation(program, 'aUv')
+    const uvBuf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf)
+    gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW)
+    gl.enableVertexAttribArray(uvLoc)
+    gl.vertexAttribPointer(uvLoc, 2, gl.FLOAT, false, 0, 0)
+
+    const idxBuf = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    // --- Textura del texto ---
+    const texture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+
+    const textCanvas = renderTextCanvas(text, fontFamily, fontSize * dpr, pxWidth, pxHeight)
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas)
+
+    // --- Uniforms ---
+    const uTex = gl.getUniformLocation(program, 'uTex')
+    const uTime = gl.getUniformLocation(program, 'uTime')
+    const uInterval = gl.getUniformLocation(program, 'uInterval')
+    const uSweepDuration = gl.getUniformLocation(program, 'uSweepDuration')
+    const uSweepWidth = gl.getUniformLocation(program, 'uSweepWidth')
+    const uReducedMotion = gl.getUniformLocation(program, 'uReducedMotion')
+    const uColorDark = gl.getUniformLocation(program, 'uColorDark')
+    const uColorLight = gl.getUniformLocation(program, 'uColorLight')
+    const uHighlight = gl.getUniformLocation(program, 'uHighlight')
+
+    const baseColor = parseHexColor(baseColorHex)
+    const { light, dark } = deriveMetalTones(baseColor)
+
+    // Ya tenemos el canvas WebGL listo: recién ahora escondemos el
+    // fallback CSS y mostramos el canvas (sin flash del fallback
+    // desapareciendo de golpe).
+    fallback.style.display = 'none'
+    canvas.style.display = 'block'
+
+    const start = performance.now()
+
+    function frame(now: number) {
+      const t = (now - start) / 1000
+
+      gl.useProgram(program)
+      gl.bindVertexArray(vao)
+
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, texture)
+      gl.uniform1i(uTex, 0)
+
+      gl.uniform1f(uTime, t)
+      gl.uniform1f(uInterval, interval)
+      gl.uniform1f(uSweepDuration, sweepDuration)
+      gl.uniform1f(uSweepWidth, 0.16)
+      gl.uniform1f(uReducedMotion, prefersReducedMotion ? 1 : 0)
+      gl.uniform3f(uColorDark, dark[0], dark[1], dark[2])
+      gl.uniform3f(uColorLight, light[0], light[1], light[2])
+      gl.uniform3f(uHighlight, 1.0, 1.0, 1.0)
+
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.enable(gl.BLEND)
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0)
+
+      requestAnimationFrame(frame)
+    }
+
+    requestAnimationFrame(frame)
+  }
+
+  function initAll() {
+    document.querySelectorAll<HTMLElement>('[data-silver-text]').forEach((el) => {
+      if (el.dataset.initialized === 'true') return
+      el.dataset.initialized = 'true'
+      initOne(el)
+    })
+  }
+
+  initAll()
+  document.addEventListener('astro:page-load', initAll)
+</script>
