@@ -1,8 +1,7 @@
 ---
-
 export interface Props {
   text?: string
-  fontSize?: number
+  fontSize?: number | string // número = px fijo; string = cualquier valor CSS (clamp(), vw, rem...) para que sea responsive
   fontFamily?: string
   color?: string
   interval?: number
@@ -13,35 +12,48 @@ export interface Props {
 
 const {
   text = 'PLATEADO',
-  fontSize = 96,
+  fontSize = 'clamp(2.5rem, 6vw, 6rem)',
   fontFamily = 'Inter',
   color = '#c8ccd2',
   interval = 4,
-  sweepDuration = 3,
+  sweepDuration = 2.1,
   padding = 24,
   class: className = ''
 } = Astro.props
+
+// Si fontSize es un número, o un string puramente numérico sin
+// unidad (ej. "48" en vez de "48px" — un error fácil de cometer al
+// pasar el prop como string), se le agrega "px". Cualquier otra cosa
+// (clamp(), vw, rem, %...) se usa tal cual.
+const fontSizeCSS = (() => {
+  if (typeof fontSize === 'number') return `${fontSize}px`
+  const trimmed = String(fontSize).trim()
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`
+  return trimmed
+})()
 ---
 
 <div
   data-silver-text
   data-text={text}
-  data-font-size={fontSize}
   data-font-family={fontFamily}
   data-color={color}
   data-interval={interval}
   data-sweep-duration={sweepDuration}
   data-padding={padding}
   class={`relative inline-block select-none ${className}`}
+  style={`font-size:${fontSizeCSS};`}
 >
   <canvas data-silver-canvas class="block h-full w-full"></canvas>
 
   {/* Fallback CSS puro: visible por defecto (SSR), se oculta si el
-      script logra montar WebGL. Así nunca hay un hueco en blanco. */}
+      script logra montar WebGL. Así nunca hay un hueco en blanco.
+      font-size: inherit -> hereda el mismo clamp()/vw del wrapper,
+      así que es responsive incluso sin JS. */}
   <span
     data-silver-fallback
     class="silver-fallback-text block whitespace-nowrap bg-clip-text font-bold text-transparent"
-    style={`font-family:"${fontFamily}", sans-serif; font-size:${fontSize}px; background-image: linear-gradient(115deg, #6b6f76 0%, #f4f6f8 22%, #9a9ea5 45%, #ffffff 60%, #7d8189 78%, #eef0f2 100%);`}
+    style={`font-family:"${fontFamily}", sans-serif; font-size:inherit; background-image: linear-gradient(115deg, #6b6f76 0%, #f4f6f8 22%, #9a9ea5 45%, #ffffff 60%, #7d8189 78%, #eef0f2 100%);`}
   >{text}</span>
 </div>
 
@@ -57,7 +69,7 @@ const {
   .silver-fallback-text {
     /* Un poco de textura simulada solo con CSS para el fallback: un
        segundo gradiente muy sutil por encima ayuda a que no se vea
-       100% plano, aunque claramente es más simple que la versión WebGL. */
+       100% plano*/
     filter: contrast(1.05);
   }
 </style>
@@ -271,7 +283,6 @@ const {
 
     const text = wrapper.dataset.text || 'PLATEADO'
     const fontFamily = wrapper.dataset.fontFamily || 'Inter'
-    const fontSize = Number(wrapper.dataset.fontSize) || 96
     const baseColorHex = wrapper.dataset.color || '#c8ccd2'
     const interval = Number(wrapper.dataset.interval) || 4
     const sweepDuration = Number(wrapper.dataset.sweepDuration) || 1.1
@@ -280,29 +291,22 @@ const {
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
     if (!supportsWebGL2()) {
-      // Sin WebGL2: dejamos el fallback CSS visible tal cual está y no hacemos nada más.
+      // Sin WebGL2: dejamos el fallback CSS visible tal cual está.
+      // Como su font-size es `inherit` del wrapper (que ya trae el
+      // clamp()/vw resuelto por el navegador), sigue siendo
+      // responsive aunque nunca se monte el canvas.
       return
     }
 
     const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: true })
     if (!gl) return
 
-    // --- Tamaño según el texto ---
-    await waitForFont(fontFamily, fontSize)
-    const { width: textW, height: textH } = measureText(text, fontFamily, fontSize)
-    const cssWidth = Math.ceil(textW + padding * 2)
-    const cssHeight = Math.ceil(textH + padding * 2)
-    wrapper.style.width = `${cssWidth}px`
-    wrapper.style.height = `${cssHeight}px`
+    await waitForFont(fontFamily, 96) // tamaño de sondeo, no afecta el resultado final
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
-    const pxWidth = Math.max(2, Math.round(cssWidth * dpr))
-    const pxHeight = Math.max(2, Math.round(cssHeight * dpr))
-    canvas.width = pxWidth
-    canvas.height = pxHeight
-    gl.viewport(0, 0, pxWidth, pxHeight)
-
-    // --- Shaders / programa ---
+    // --- Programa / shaders / geometría / textura: se crean UNA
+    // sola vez. Lo que cambia con el tamaño (font-size responsive)
+    // es solo el contenido de la textura y las dimensiones del
+    // canvas, no el programa en sí. ---
     const vs = compile(gl, gl.VERTEX_SHADER, VERT_SRC)
     const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG_SRC)
     if (!vs || !fs) return
@@ -316,7 +320,6 @@ const {
       return
     }
 
-    // --- Geometría: un solo quad, sin grid (no hay física acá) ---
     const positions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1])
     const uvs = new Float32Array([0, 1, 1, 1, 0, 0, 1, 0])
     const indices = new Uint16Array([0, 1, 2, 2, 1, 3])
@@ -342,7 +345,6 @@ const {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf)
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
 
-    // --- Textura del texto ---
     const texture = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, texture)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -350,11 +352,6 @@ const {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
 
-    const textCanvas = renderTextCanvas(text, fontFamily, fontSize * dpr, pxWidth, pxHeight)
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas)
-
-    // --- Uniforms ---
     const uTex = gl.getUniformLocation(program, 'uTex')
     const uTime = gl.getUniformLocation(program, 'uTime')
     const uInterval = gl.getUniformLocation(program, 'uInterval')
@@ -368,11 +365,59 @@ const {
     const baseColor = parseHexColor(baseColorHex)
     const { light, dark } = deriveMetalTones(baseColor)
 
-    // Ya tenemos el canvas WebGL listo: recién ahora escondemos el
-    // fallback CSS y mostramos el canvas (sin flash del fallback
-    // desapareciendo de golpe).
-    fallback.style.display = 'none'
-    canvas.style.display = 'block'
+    // --- Esto SÍ se repite cada vez que cambia el tamaño resuelto
+    // (primer render, resize de ventana, cambio de orientación). ---
+    let lastResolvedPx = 0
+
+    async function rebuildForCurrentSize() {
+      // Lee el font-size YA RESUELTO por el navegador (el que
+      // resulta de aplicar el clamp()/vw a este viewport), en vez de
+      // reimplementar esa lógica a mano acá.
+      const resolvedPx = parseFloat(getComputedStyle(wrapper).fontSize) || 96
+
+      // Evita reconstruir por diferencias microscópicas (subpíxeles
+      // por redondeo) que no cambian nada visualmente.
+      if (Math.abs(resolvedPx - lastResolvedPx) < 0.5) return
+      lastResolvedPx = resolvedPx
+
+      await waitForFont(fontFamily, resolvedPx)
+
+      const { width: textW, height: textH } = measureText(text, fontFamily, resolvedPx)
+      const cssWidth = Math.ceil(textW + padding * 2)
+      const cssHeight = Math.ceil(textH + padding * 2)
+      wrapper.style.width = `${cssWidth}px`
+      wrapper.style.height = `${cssHeight}px`
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      const pxWidth = Math.max(2, Math.round(cssWidth * dpr))
+      const pxHeight = Math.max(2, Math.round(cssHeight * dpr))
+      canvas.width = pxWidth
+      canvas.height = pxHeight
+      gl.viewport(0, 0, pxWidth, pxHeight)
+
+      const textCanvas = renderTextCanvas(text, fontFamily, resolvedPx * dpr, pxWidth, pxHeight)
+      gl.bindTexture(gl.TEXTURE_2D, texture)
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas)
+
+      // La primera vez que esto corre, recién ahí escondemos el
+      // fallback CSS y mostramos el canvas (nada de flash).
+      if (fallback.style.display !== 'none') {
+        fallback.style.display = 'none'
+        canvas.style.display = 'block'
+      }
+    }
+
+    await rebuildForCurrentSize()
+
+    // Reconstruye cuando cambia el viewport (resize, rotar el
+    // celular, zoom del navegador) — con debounce para no recalcular
+    // en cada pixel mientras se arrastra la ventana.
+    let resizeTimeout: ReturnType<typeof setTimeout> | undefined
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimeout)
+      resizeTimeout = setTimeout(rebuildForCurrentSize, 150)
+    })
 
     const start = performance.now()
 
