@@ -1,0 +1,1522 @@
+---
+interface Props {
+  text?: string;
+  fontFamily?: string;
+  fontSize?: number; // tamaño base en px (se escala luego por devicePixelRatio internamente)
+  fitToText?: boolean; // si es true (default), el ancho/alto del canvas se calcula a partir del texto en vez de llenar al padre
+  padding?: number; // aire en px CSS alrededor del texto (necesario para que el efecto de malla no se recorte en los bordes)
+}
+
+const {
+  text = "MESH",
+  fontFamily = "Inter",
+  fontSize = 160,
+  fitToText = true,
+  padding = 60,
+} = Astro.props;
+---
+
+<div
+  data-mesh-text
+  data-text={text}
+  data-font-family={fontFamily}
+  data-font-size={fontSize}
+  data-fit-to-text={fitToText ? "true" : "false"}
+  data-padding={padding}
+  class={`relative overflow-hidden select-none ${fitToText ? "inline-block" : "h-full w-full"}`}
+>
+  <canvas
+    data-mesh-canvas
+    class="block h-full w-full"
+  ></canvas>
+</div>
+
+<script>
+  const GRID_W = 96;
+  const GRID_H = 40;
+
+  const DRAG = 1.8;
+  const SPRING_K = 0.08;
+  const DAMPING = 0.9;
+  const DT = 0.1;
+  const CHROMA = 0.005;
+
+  const TEXT_COLOR = "#ffffff";
+  const FONT_WEIGHT = 700;
+  const FONT_STYLE = "normal";
+
+  const COLOR_A = "#ff40c0";
+  const COLOR_B = "#40ff80";
+
+  // --------------------------------------------------
+  // Vertex shader
+  // --------------------------------------------------
+
+  const VERT_SRC = `#version 300 es
+
+    in vec2 aPos;
+    in vec2 aUv;
+    in vec2 aDisp;
+
+    out vec2 vUv;
+    out float vMag;
+
+    void main() {
+      gl_Position = vec4(
+        aPos + aDisp,
+        0.0,
+        1.0
+      );
+
+      vUv = aUv;
+      vMag = length(aDisp);
+    }
+
+  `;
+
+  // --------------------------------------------------
+  // Fragment shader
+  // --------------------------------------------------
+
+  const FRAG_SRC = `#version 300 es
+
+    precision highp float;
+
+    in vec2 vUv;
+    in float vMag;
+
+    out vec4 outColor;
+
+    uniform sampler2D uTex;
+    uniform float uChroma;
+    uniform vec3 uColorA;
+    uniform vec3 uColorB;
+
+    void main() {
+
+      vec4 base = texture(
+        uTex,
+        vUv
+      );
+
+      if (uChroma > 0.0) {
+
+        float o =
+          uChroma *
+          ${CHROMA.toFixed(5)} *
+          clamp(
+            vMag * 8.0,
+            0.0,
+            1.0
+          );
+
+        float aOff =
+          texture(
+            uTex,
+            vUv + vec2(o, 0.0)
+          ).a;
+
+        float bOff =
+          texture(
+            uTex,
+            vUv - vec2(o, 0.0)
+          ).a;
+
+        vec3 col =
+          base.rgb * base.a;
+
+        col +=
+          uColorA *
+          max(
+            0.0,
+            aOff - base.a
+          );
+
+        col +=
+          uColorB *
+          max(
+            0.0,
+            bOff - base.a
+          );
+
+        float aMax =
+          max(
+            base.a,
+            max(
+              aOff,
+              bOff
+            )
+          );
+
+        outColor =
+          vec4(
+            col,
+            aMax
+          );
+
+      } else {
+
+        outColor = base;
+
+      }
+
+    }
+
+  `;
+
+  // --------------------------------------------------
+  // Compile shader
+  // --------------------------------------------------
+
+  function compileShader(
+    gl: WebGL2RenderingContext,
+    type: number,
+    source: string
+  ): WebGLShader | null {
+
+    const shader =
+      gl.createShader(type);
+
+    if (!shader) {
+      return null;
+    }
+
+    gl.shaderSource(
+      shader,
+      source
+    );
+
+    gl.compileShader(shader);
+
+    if (
+      !gl.getShaderParameter(
+        shader,
+        gl.COMPILE_STATUS
+      )
+    ) {
+
+      console.error(
+        "MeshText shader error:",
+        gl.getShaderInfoLog(shader)
+      );
+
+      gl.deleteShader(shader);
+
+      return null;
+    }
+
+    return shader;
+  }
+
+  // --------------------------------------------------
+  // Link program
+  // --------------------------------------------------
+
+  function createProgram(
+    gl: WebGL2RenderingContext,
+    vertexShader: WebGLShader,
+    fragmentShader: WebGLShader
+  ): WebGLProgram | null {
+
+    const program =
+      gl.createProgram();
+
+    if (!program) {
+      return null;
+    }
+
+    gl.attachShader(
+      program,
+      vertexShader
+    );
+
+    gl.attachShader(
+      program,
+      fragmentShader
+    );
+
+    gl.linkProgram(program);
+
+    if (
+      !gl.getProgramParameter(
+        program,
+        gl.LINK_STATUS
+      )
+    ) {
+
+      console.error(
+        "MeshText program error:",
+        gl.getProgramInfoLog(program)
+      );
+
+      gl.deleteProgram(program);
+
+      return null;
+    }
+
+    return program;
+  }
+
+  // --------------------------------------------------
+  // Parse color
+  // --------------------------------------------------
+
+  function parseColor(
+    value: string
+  ): [number, number, number] {
+
+    const color =
+      value.trim();
+
+    if (color.startsWith("#")) {
+
+      let hex =
+        color.slice(1);
+
+      if (hex.length === 3) {
+        hex = hex
+          .split("")
+          .map(
+            (char) => char + char
+          )
+          .join("");
+      }
+
+      if (hex.length >= 6) {
+
+        const r =
+          parseInt(
+            hex.slice(0, 2),
+            16
+          ) / 255;
+
+        const g =
+          parseInt(
+            hex.slice(2, 4),
+            16
+          ) / 255;
+
+        const b =
+          parseInt(
+            hex.slice(4, 6),
+            16
+          ) / 255;
+
+        return [r, g, b];
+      }
+    }
+
+    const match =
+      color.match(
+        /rgba?\s*\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i
+      );
+
+    if (match) {
+
+      return [
+        parseInt(match[1], 10) / 255,
+        parseInt(match[2], 10) / 255,
+        parseInt(match[3], 10) / 255,
+      ];
+    }
+
+    return [1, 1, 1];
+  }
+
+  // --------------------------------------------------
+  // Render text into canvas
+  // --------------------------------------------------
+
+  function renderText(
+    text: string,
+    color: string,
+    fontFamily: string,
+    fontSize: number,
+    width: number,
+    height: number
+  ): HTMLCanvasElement {
+
+    const canvas =
+      document.createElement(
+        "canvas"
+      );
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const context =
+      canvas.getContext("2d");
+
+    if (!context) {
+      return canvas;
+    }
+
+    context.clearRect(
+      0,
+      0,
+      width,
+      height
+    );
+
+    context.fillStyle =
+      color;
+
+    context.textAlign =
+      "center";
+
+    context.textBaseline =
+      "middle";
+
+    context.font =
+      `${FONT_STYLE} ${FONT_WEIGHT} ${fontSize}px "${fontFamily}", sans-serif`;
+
+    context.fillText(
+      text,
+      width / 2,
+      height / 2
+    );
+
+    return canvas;
+  }
+
+  // --------------------------------------------------
+  // Initialize component
+  // --------------------------------------------------
+
+  function initialize(
+    wrapper: HTMLElement
+  ) {
+
+    const canvas =
+      wrapper.querySelector<HTMLCanvasElement>(
+        "[data-mesh-canvas]"
+      );
+
+    if (!canvas) {
+      return;
+    }
+
+    const text =
+      wrapper.dataset.text ||
+      "MESH";
+
+    const fontFamily =
+      wrapper.dataset.fontFamily ||
+      "Inter";
+
+    // Tamaño base en px, tal cual llega por prop (sin escalar por
+    // dpr todavía; eso se hace en rebuildTexture, que es donde se
+    // conoce el devicePixelRatio real de la pantalla).
+    const baseFontSize =
+      Number(wrapper.dataset.fontSize) || 160;
+
+    const fitToText =
+      wrapper.dataset.fitToText === "true";
+
+    const padding =
+      Number(wrapper.dataset.padding) || 0;
+
+    // ------------------------------------------------
+    // WebGL
+    // ------------------------------------------------
+
+    const gl =
+      canvas.getContext(
+        "webgl2",
+        {
+          alpha: true,
+          premultipliedAlpha: true,
+          antialias: true,
+        }
+      );
+
+    if (!gl) {
+
+      console.error(
+        "MeshText: WebGL2 is not available."
+      );
+
+      return;
+    }
+
+    // ------------------------------------------------
+    // Grid
+    // ------------------------------------------------
+
+    const vertexCount =
+      (GRID_W + 1) *
+      (GRID_H + 1);
+
+    const positions =
+      new Float32Array(
+        vertexCount * 2
+      );
+
+    const uvs =
+      new Float32Array(
+        vertexCount * 2
+      );
+
+    for (
+      let y = 0;
+      y <= GRID_H;
+      y++
+    ) {
+
+      for (
+        let x = 0;
+        x <= GRID_W;
+        x++
+      ) {
+
+        const index =
+          y * (GRID_W + 1) + x;
+
+        const u =
+          x / GRID_W;
+
+        const v =
+          y / GRID_H;
+
+        positions[
+          index * 2
+        ] =
+          u * 2 - 1;
+
+        positions[
+          index * 2 + 1
+        ] =
+          1 - v * 2;
+
+        uvs[
+          index * 2
+        ] = u;
+
+        uvs[
+          index * 2 + 1
+        ] = v;
+      }
+    }
+
+    // ------------------------------------------------
+    // Indices
+    // ------------------------------------------------
+
+    const indexCount =
+      GRID_W *
+      GRID_H *
+      6;
+
+    const indices =
+      new Uint32Array(
+        indexCount
+      );
+
+    let indexPointer = 0;
+
+    for (
+      let y = 0;
+      y < GRID_H;
+      y++
+    ) {
+
+      for (
+        let x = 0;
+        x < GRID_W;
+        x++
+      ) {
+
+        const a =
+          y * (GRID_W + 1) + x;
+
+        const b =
+          a + 1;
+
+        const c =
+          a + (GRID_W + 1);
+
+        const d =
+          c + 1;
+
+        indices[
+          indexPointer++
+        ] = a;
+
+        indices[
+          indexPointer++
+        ] = c;
+
+        indices[
+          indexPointer++
+        ] = b;
+
+        indices[
+          indexPointer++
+        ] = b;
+
+        indices[
+          indexPointer++
+        ] = c;
+
+        indices[
+          indexPointer++
+        ] = d;
+      }
+    }
+
+    // ------------------------------------------------
+    // Physics
+    // ------------------------------------------------
+
+    const displacement =
+      new Float32Array(
+        vertexCount * 2
+      );
+
+    const velocity =
+      new Float32Array(
+        vertexCount * 2
+      );
+
+    // ------------------------------------------------
+    // Shaders
+    // ------------------------------------------------
+
+    const vertexShader =
+      compileShader(
+        gl,
+        gl.VERTEX_SHADER,
+        VERT_SRC
+      );
+
+    const fragmentShader =
+      compileShader(
+        gl,
+        gl.FRAGMENT_SHADER,
+        FRAG_SRC
+      );
+
+    if (
+      !vertexShader ||
+      !fragmentShader
+    ) {
+      return;
+    }
+
+    const program =
+      createProgram(
+        gl,
+        vertexShader,
+        fragmentShader
+      );
+
+    if (!program) {
+      return;
+    }
+
+    // ------------------------------------------------
+    // Attributes
+    // ------------------------------------------------
+
+    const positionLocation =
+      gl.getAttribLocation(
+        program,
+        "aPos"
+      );
+
+    const uvLocation =
+      gl.getAttribLocation(
+        program,
+        "aUv"
+      );
+
+    const displacementLocation =
+      gl.getAttribLocation(
+        program,
+        "aDisp"
+      );
+
+    // ------------------------------------------------
+    // Uniforms
+    // ------------------------------------------------
+
+    const textureLocation =
+      gl.getUniformLocation(
+        program,
+        "uTex"
+      );
+
+    const chromaLocation =
+      gl.getUniformLocation(
+        program,
+        "uChroma"
+      );
+
+    const colorALocation =
+      gl.getUniformLocation(
+        program,
+        "uColorA"
+      );
+
+    const colorBLocation =
+      gl.getUniformLocation(
+        program,
+        "uColorB"
+      );
+
+    // ------------------------------------------------
+    // VAO
+    // ------------------------------------------------
+
+    const vao =
+      gl.createVertexArray();
+
+    gl.bindVertexArray(
+      vao
+    );
+
+    // ------------------------------------------------
+    // Position buffer
+    // ------------------------------------------------
+
+    const positionBuffer =
+      gl.createBuffer();
+
+    gl.bindBuffer(
+      gl.ARRAY_BUFFER,
+      positionBuffer
+    );
+
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      positions,
+      gl.STATIC_DRAW
+    );
+
+    gl.enableVertexAttribArray(
+      positionLocation
+    );
+
+    gl.vertexAttribPointer(
+      positionLocation,
+      2,
+      gl.FLOAT,
+      false,
+      0,
+      0
+    );
+
+    // ------------------------------------------------
+    // UV buffer
+    // ------------------------------------------------
+
+    const uvBuffer =
+      gl.createBuffer();
+
+    gl.bindBuffer(
+      gl.ARRAY_BUFFER,
+      uvBuffer
+    );
+
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      uvs,
+      gl.STATIC_DRAW
+    );
+
+    gl.enableVertexAttribArray(
+      uvLocation
+    );
+
+    gl.vertexAttribPointer(
+      uvLocation,
+      2,
+      gl.FLOAT,
+      false,
+      0,
+      0
+    );
+
+    // ------------------------------------------------
+    // Displacement buffer
+    // ------------------------------------------------
+
+    const displacementBuffer =
+      gl.createBuffer();
+
+    gl.bindBuffer(
+      gl.ARRAY_BUFFER,
+      displacementBuffer
+    );
+
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      displacement,
+      gl.DYNAMIC_DRAW
+    );
+
+    gl.enableVertexAttribArray(
+      displacementLocation
+    );
+
+    gl.vertexAttribPointer(
+      displacementLocation,
+      2,
+      gl.FLOAT,
+      false,
+      0,
+      0
+    );
+
+    // ------------------------------------------------
+    // Index buffer
+    // ------------------------------------------------
+
+    const indexBuffer =
+      gl.createBuffer();
+
+    gl.bindBuffer(
+      gl.ELEMENT_ARRAY_BUFFER,
+      indexBuffer
+    );
+
+    gl.bufferData(
+      gl.ELEMENT_ARRAY_BUFFER,
+      indices,
+      gl.STATIC_DRAW
+    );
+
+    // ------------------------------------------------
+    // Texture
+    // ------------------------------------------------
+
+    const texture =
+      gl.createTexture();
+
+    if (!texture) {
+      return;
+    }
+
+    gl.bindTexture(
+      gl.TEXTURE_2D,
+      texture
+    );
+
+    gl.texParameteri(
+      gl.TEXTURE_2D,
+      gl.TEXTURE_WRAP_S,
+      gl.CLAMP_TO_EDGE
+    );
+
+    gl.texParameteri(
+      gl.TEXTURE_2D,
+      gl.TEXTURE_WRAP_T,
+      gl.CLAMP_TO_EDGE
+    );
+
+    gl.texParameteri(
+      gl.TEXTURE_2D,
+      gl.TEXTURE_MIN_FILTER,
+      gl.LINEAR
+    );
+
+    gl.texParameteri(
+      gl.TEXTURE_2D,
+      gl.TEXTURE_MAG_FILTER,
+      gl.LINEAR
+    );
+
+    // ------------------------------------------------
+    // Ajustar el tamaño del contenedor al texto
+    // ------------------------------------------------
+
+    async function waitForFont(pxSize: number) {
+
+      try {
+
+        if (document.fonts?.load) {
+
+          await document.fonts.load(
+            `${FONT_STYLE} ${FONT_WEIGHT} ${pxSize}px "${fontFamily}"`
+          );
+        }
+
+        if (document.fonts?.ready) {
+          await document.fonts.ready;
+        }
+
+      } catch {
+        // La fuente puede no estar disponible; seguimos con el fallback.
+      }
+    }
+
+    // Mide el texto con la fuente/tamaño reales usando un canvas 2D
+    // aparte (mismo mecanismo que usa el navegador para dibujarlo,
+    // así el ancho/alto calculado calza con lo que se ve).
+    function measureTextMetrics(pxSize: number) {
+
+      const measureCanvas =
+        document.createElement("canvas");
+
+      const ctx =
+        measureCanvas.getContext("2d");
+
+      if (!ctx) {
+        // Fallback burdo si por lo que sea no hay contexto 2D.
+        return {
+          width: pxSize * text.length * 0.6,
+          height: pxSize * 1.2,
+        };
+      }
+
+      ctx.font =
+        `${FONT_STYLE} ${FONT_WEIGHT} ${pxSize}px "${fontFamily}", sans-serif`;
+
+      const metrics =
+        ctx.measureText(text);
+
+      const width =
+        metrics.width;
+
+      // actualBoundingBoxAscent/Descent dan el alto real de los
+      // glifos (no la altura de línea genérica de la fuente), que es
+      // lo que queremos para que el recorte quede ajustado al texto.
+      const ascent =
+        metrics.actualBoundingBoxAscent ?? pxSize * 0.8;
+
+      const descent =
+        metrics.actualBoundingBoxDescent ?? pxSize * 0.25;
+
+      return {
+        width,
+        height: ascent + descent,
+      };
+    }
+
+    // Espera a que la fuente esté lista, mide el texto a tamaño real
+    // (baseFontSize, en px CSS, sin escalar por dpr) y fija el
+    // ancho/alto del wrapper en base a eso + el padding. Esto corre
+    // ANTES del primer resize(), para que el canvas nazca ya del
+    // tamaño correcto en vez de heredar el 100%/100% del padre.
+    async function sizeToContent() {
+
+      await waitForFont(baseFontSize);
+
+      const { width, height } =
+        measureTextMetrics(baseFontSize);
+
+      wrapper.style.width =
+        `${Math.ceil(width + padding * 2)}px`;
+
+      wrapper.style.height =
+        `${Math.ceil(height + padding * 2)}px`;
+    }
+
+    // ------------------------------------------------
+    // Resize
+    // ------------------------------------------------
+
+    let cancelled = false;
+
+    async function rebuildTexture() {
+
+      const width =
+        Math.max(
+          2,
+          canvas.width
+        );
+
+      const height =
+        Math.max(
+          2,
+          canvas.height
+        );
+
+      const dpr =
+        window.devicePixelRatio ||
+        1;
+
+      const fontSize =
+        baseFontSize * dpr;
+
+      // Esperar a que la fuente esté disponible. Esto funciona
+      // igual para una fuente de Google Fonts que para una @font-face
+      // propia declarada en tu global.css: lo único que le importa a
+      // document.fonts es que el NOMBRE (font-family) coincida con
+      // el que declaraste ahí.
+      try {
+
+        if (
+          document.fonts?.load
+        ) {
+
+          await document.fonts.load(
+            `${FONT_STYLE} ${FONT_WEIGHT} ${fontSize}px "${fontFamily}"`
+          );
+        }
+
+        if (
+          document.fonts?.ready
+        ) {
+          await document.fonts.ready;
+        }
+
+      } catch {
+        // La fuente puede no estar disponible.
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      const textCanvas =
+        renderText(
+          text,
+          TEXT_COLOR,
+          fontFamily,
+          fontSize,
+          width,
+          height
+        );
+
+      gl.bindTexture(
+        gl.TEXTURE_2D,
+        texture
+      );
+
+      gl.pixelStorei(
+        gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,
+        true
+      );
+
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        textCanvas
+      );
+    }
+
+    function resize() {
+
+      const dpr =
+        window.devicePixelRatio ||
+        1;
+
+      const rect =
+        wrapper.getBoundingClientRect();
+
+      const width =
+        Math.max(
+          2,
+          Math.round(
+            rect.width * dpr
+          )
+        );
+
+      const height =
+        Math.max(
+          2,
+          Math.round(
+            rect.height * dpr
+          )
+        );
+
+      if (
+        canvas.width !== width ||
+        canvas.height !== height
+      ) {
+
+        canvas.width = width;
+        canvas.height = height;
+
+        gl.viewport(
+          0,
+          0,
+          width,
+          height
+        );
+
+        rebuildTexture();
+      }
+    }
+
+    const resizeObserver =
+      new ResizeObserver(
+        resize
+      );
+
+    resizeObserver.observe(
+      wrapper
+    );
+
+    // Si fitToText está activo, primero fijamos el tamaño del
+    // wrapper en base al texto medido, y RECIÉN AHÍ corremos el
+    // resize()/rebuildTexture() de siempre (que toma el tamaño ya
+    // sea el del wrapper ajustado, o el heredado del padre si
+    // fitToText está apagado).
+    if (fitToText) {
+
+      sizeToContent().then(() => {
+        resize();
+        rebuildTexture();
+      });
+
+    } else {
+
+      resize();
+      rebuildTexture();
+    }
+
+    // ------------------------------------------------
+    // Pointer
+    // ------------------------------------------------
+
+    const cursor = {
+      x: 99,
+      y: 99,
+
+      previousX: 99,
+      previousY: 99,
+
+      velocityX: 0,
+      velocityY: 0,
+
+      inside: false,
+    };
+
+    function onPointerMove(
+      event: PointerEvent
+    ) {
+
+      const rect =
+        canvas.getBoundingClientRect();
+
+      const normalizedX =
+        (event.clientX - rect.left) /
+        rect.width;
+
+      const normalizedY =
+        (event.clientY - rect.top) /
+        rect.height;
+
+      const x =
+        normalizedX * 2 - 1;
+
+      const y =
+        1 - normalizedY * 2;
+
+      if (!cursor.inside) {
+
+        cursor.previousX = x;
+        cursor.previousY = y;
+
+        cursor.inside = true;
+      }
+
+      cursor.x = x;
+      cursor.y = y;
+    }
+
+    function onPointerLeave() {
+
+      cursor.inside = false;
+
+      cursor.x = 99;
+      cursor.y = 99;
+
+      cursor.velocityX = 0;
+      cursor.velocityY = 0;
+    }
+
+    wrapper.addEventListener(
+      "pointermove",
+      onPointerMove
+    );
+
+    wrapper.addEventListener(
+      "pointerleave",
+      onPointerLeave
+    );
+
+    // ------------------------------------------------
+    // Colors
+    // ------------------------------------------------
+
+    const colorA =
+      parseColor(
+        COLOR_A
+      );
+
+    const colorB =
+      parseColor(
+        COLOR_B
+      );
+
+    // ------------------------------------------------
+    // Animation
+    // ------------------------------------------------
+
+    let animationId = 0;
+
+    function animate() {
+
+      // ----------------------------------------------
+      // Cursor velocity
+      // ----------------------------------------------
+
+      cursor.velocityX =
+        cursor.x -
+        cursor.previousX;
+
+      cursor.velocityY =
+        cursor.y -
+        cursor.previousY;
+
+      const cursorVelocity =
+        Math.hypot(
+          cursor.velocityX,
+          cursor.velocityY
+        );
+
+      if (
+        cursorVelocity > 0.3
+      ) {
+
+        cursor.velocityX = 0;
+        cursor.velocityY = 0;
+      }
+
+      cursor.previousX =
+        cursor.x;
+
+      cursor.previousY =
+        cursor.y;
+
+      // ----------------------------------------------
+      // Mesh physics
+      // ----------------------------------------------
+
+      for (
+        let i = 0;
+        i < vertexCount;
+        i++
+      ) {
+
+        const offset =
+          i * 2;
+
+        const positionX =
+          positions[offset];
+
+        const positionY =
+          positions[offset + 1];
+
+        const displacementX =
+          displacement[offset];
+
+        const displacementY =
+          displacement[offset + 1];
+
+        const cursorX =
+          cursor.x -
+          (
+            positionX +
+            displacementX
+          );
+
+        const cursorY =
+          cursor.y -
+          (
+            positionY +
+            displacementY
+          );
+
+        const distance =
+          Math.hypot(
+            cursorX,
+            cursorY
+          );
+
+        const proximity =
+          Math.max(
+            0,
+            1 /
+              (
+                1 +
+                distance / 0.05
+              ) -
+              0.1
+          );
+
+        let velocityX =
+          velocity[offset];
+
+        let velocityY =
+          velocity[offset + 1];
+
+        // Drag
+        velocityX +=
+          cursor.velocityX *
+          DRAG *
+          proximity;
+
+        velocityY +=
+          cursor.velocityY *
+          DRAG *
+          proximity;
+
+        // Spring
+        velocityX -=
+          displacementX *
+          SPRING_K;
+
+        velocityY -=
+          displacementY *
+          SPRING_K;
+
+        // Damping
+        velocityX *=
+          DAMPING;
+
+        velocityY *=
+          DAMPING;
+
+        velocity[offset] =
+          velocityX;
+
+        velocity[offset + 1] =
+          velocityY;
+
+        // Integrate
+        let nextX =
+          displacementX +
+          velocityX * DT;
+
+        let nextY =
+          displacementY +
+          velocityY * DT;
+
+        // Clamp
+        nextX =
+          Math.max(
+            -1,
+            Math.min(1, nextX)
+          );
+
+        nextY =
+          Math.max(
+            -1,
+            Math.min(1, nextY)
+          );
+
+        displacement[offset] =
+          nextX;
+
+        displacement[offset + 1] =
+          nextY;
+      }
+
+      // ----------------------------------------------
+      // Upload displacement
+      // ----------------------------------------------
+
+      gl.bindBuffer(
+        gl.ARRAY_BUFFER,
+        displacementBuffer
+      );
+
+      gl.bufferSubData(
+        gl.ARRAY_BUFFER,
+        0,
+        displacement
+      );
+
+      // ----------------------------------------------
+      // Clear
+      // ----------------------------------------------
+
+      gl.clearColor(
+        0,
+        0,
+        0,
+        0
+      );
+
+      gl.clear(
+        gl.COLOR_BUFFER_BIT
+      );
+
+      // ----------------------------------------------
+      // Draw
+      // ----------------------------------------------
+
+      gl.useProgram(
+        program
+      );
+
+      gl.activeTexture(
+        gl.TEXTURE0
+      );
+
+      gl.bindTexture(
+        gl.TEXTURE_2D,
+        texture
+      );
+
+      gl.uniform1i(
+        textureLocation,
+        0
+      );
+
+      // Chromatic effect
+      gl.uniform1f(
+        chromaLocation,
+        1
+      );
+
+      gl.uniform3f(
+        colorALocation,
+        colorA[0],
+        colorA[1],
+        colorA[2]
+      );
+
+      gl.uniform3f(
+        colorBLocation,
+        colorB[0],
+        colorB[1],
+        colorB[2]
+      );
+
+      gl.enable(
+        gl.BLEND
+      );
+
+      gl.blendFunc(
+        gl.ONE,
+        gl.ONE_MINUS_SRC_ALPHA
+      );
+
+      gl.bindVertexArray(
+        vao
+      );
+
+      gl.drawElements(
+        gl.TRIANGLES,
+        indexCount,
+        gl.UNSIGNED_INT,
+        0
+      );
+
+      animationId =
+        requestAnimationFrame(
+          animate
+        );
+    }
+
+    animationId =
+      requestAnimationFrame(
+        animate
+      );
+
+    // ------------------------------------------------
+    // Cleanup
+    // ------------------------------------------------
+
+    return () => {
+
+      cancelled = true;
+
+      cancelAnimationFrame(
+        animationId
+      );
+
+      resizeObserver.disconnect();
+
+      wrapper.removeEventListener(
+        "pointermove",
+        onPointerMove
+      );
+
+      wrapper.removeEventListener(
+        "pointerleave",
+        onPointerLeave
+      );
+
+      gl.deleteBuffer(
+        positionBuffer
+      );
+
+      gl.deleteBuffer(
+        uvBuffer
+      );
+
+      gl.deleteBuffer(
+        displacementBuffer
+      );
+
+      gl.deleteBuffer(
+        indexBuffer
+      );
+
+      gl.deleteTexture(
+        texture
+      );
+
+      gl.deleteVertexArray(
+        vao
+      );
+
+      gl.deleteProgram(
+        program
+      );
+
+      gl.deleteShader(
+        vertexShader
+      );
+
+      gl.deleteShader(
+        fragmentShader
+      );
+    };
+  }
+
+  // --------------------------------------------------
+  // Astro initialization
+  // --------------------------------------------------
+
+  function initializeAll() {
+
+    const elements =
+      document.querySelectorAll<HTMLElement>(
+        "[data-mesh-text]"
+      );
+
+    elements.forEach(
+      (element) => {
+
+        if (
+          element.dataset.initialized ===
+          "true"
+        ) {
+          return;
+        }
+
+        element.dataset.initialized =
+          "true";
+
+        initialize(element);
+      }
+    );
+  }
+
+  initializeAll();
+
+  document.addEventListener(
+    "astro:page-load",
+    initializeAll
+  );
+</script>

@@ -7,6 +7,7 @@ import { Icon } from 'astro-icon/components';
 import NavBar from './NavBar.astro';
 import LogoTild from '../ui/LogoTild.astro';
 import TheaterCurtains from '../ui/TheaterCurtains.astro'
+import TextMesh from '../common/TextMesh.astro'
 
 // Partículas del resplandor: posición, delay y duración distintos
 // para que no se muevan todas "en sincro" (se ve más orgánico).
@@ -33,13 +34,13 @@ const particles = [
   class="hidden md:block w-60 h-screen bg-cover bg-center ml-12 scale-x-120"
   style={`background-image: url(${lazoRosalAndino.src})`}
   ></div>
-  <div class="relative z-10 flex flex-col justify-center items-center">
+  <div class="relative z-10 flex flex-col justify-start md:justify-center items-center translate-y-[-10%] md:translate-0 ">
     <button id="audio-toggle" type="button" class="p-2 rounded-full bg-gray-600 inline-flex items-center justify-center cursor-pointer" aria-pressed="false">
       <Icon name="lucide:volume-2" class="w-5 h-5 text-white icon-play" />
       <Icon name="lucide:pause" class="w-5 h-5 text-white icon-pause hidden" />
     </button>
     <audio id="sikuri-audio" src={sampleAudio} preload="none"></audio>
-    <span class="text-gray-300 text-6xl font-luxurious">Sikuris</span>
+    <span class="text-gray-300 text-4xl md:text-6xl font-luxurious">Sikuris</span>
 
     {/* Contenedor relativo del logo: acá "cuelgan" el resplandor y
         las partículas, con overflow visible para que se derramen
@@ -63,8 +64,10 @@ const particles = [
         <LogoTild/>
       </div>
     </div>
-
-    <h1 class="text-gray-300 text-6xl text-center font-luxurious pb-10">Sentimiento Rosal Andino <br>Cabana</h1>
+    
+    <h1 class="text-gray-300 text-4xl md:text-6xl text-center font-luxurious pb-10">Sentimiento Rosal Andino <br>Cabana</h1>
+     <!-- <TextMesh text="Sentimiento Rosal Andino" fontFamily="Luxurious Script" fontSize={50} /> -->
+     
     <div class="hidden md:block">
       <NavBar/>
     </div>
@@ -81,7 +84,7 @@ const particles = [
 
   <!-- Mobile decorative accents bottom-left (subtle, diagonal) -->
   
-  <div class="md:hidden fixed bottom-[-200px] left-12 w-50 h-150 bg-cover bg-center -rotate-45 opacity-80 z-0 pointer-events-none" style={`background-image: url(${lazoRosalAndino.src})`}></div>
+  <div class="md:hidden fixed bottom-[-200px] left-1 w-40 h-150 bg-cover bg-center -rotate-45 opacity-80 z-0 pointer-events-none" style={`background-image: url(${lazoRosalAndino.src})`}></div>
 </main>
 
 <style>
@@ -90,8 +93,8 @@ const particles = [
      ~280px / w-70) para que se sienta como un aura ambiental del
      hero y no como un círculo pegado al ícono. */
   .glow-red {
-    width: 300px;
-    height: 300px;
+    width: 400px;
+    height: 400px;
     max-width: none;
     max-height: none;
     border-radius: 50%;
@@ -174,11 +177,11 @@ const particles = [
 
   @keyframes simplerotate {
     from {
-      transform: rotate3d(0, 1, 0, -40deg);
+      transform: rotate3d(0, 1, 0, 0deg);
     }
 
     to {
-      transform: rotate3d(0, 1, 0, 40deg);
+      transform: rotate3d(0, 1, 0, 360deg);
     }
   }
 

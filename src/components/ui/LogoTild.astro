@@ -7,7 +7,7 @@ export interface Props {
 const { class: className = '' } = Astro.props
 ---
 
-<div class={`tilt-wrapper mx-auto ${className}`} data-tilt-wrapper>
+<div class={`tilt-wrapper mx-auto ${className}`} data-tilt-wrapper data-state="idle">
   <div
     class="tilt-card group relative w-[220px] aspect-[3/3] overflow-hidden rounded-2xl bg-transparent p-0 will-change-transform"
     data-tilt-card
@@ -25,7 +25,7 @@ const { class: className = '' } = Astro.props
         {/* Capa de brillo, recortada (masked) a la silueta exacta del logo.
             Es el ÚNICO elemento que recibe el brillo ahora. */}
         <div
-          class="metal-plate-sheen pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-300"
+          class="metal-plate-sheen pointer-events-none absolute inset-0 transition-opacity duration-300"
           style={`-webkit-mask-image:url(${rosalAndinoLogo.src}); mask-image:url(${rosalAndinoLogo.src}); -webkit-mask-size:contain; mask-size:contain; -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; -webkit-mask-position:center; mask-position:center;`}
           data-metal-sheen
         >
@@ -54,6 +54,49 @@ const { class: className = '' } = Astro.props
 
   /* --- Placa metálica --- */
 
+  /* Giro continuo en reposo: como una moneda girando sobre su
+     propio eje. Al ser CSS puro (no inline), funciona incluso antes
+     de que cargue el script — y NO choca con el tilt: el tilt vive
+     en .tilt-card (rotateX/rotateY, vía JS), el giro vive acá en
+     .metal-plate (vía CSS) — son transforms anidados en elementos
+     distintos, se combinan sin pisarse.
+
+     OJO: un rotateZ "puro" siempre se ve plano, porque ese eje
+     apunta directo a la cámara — la cara nunca deja de estar de
+     frente, solo rota como una manecilla de reloj. Para que SE
+     SIENTA 3D hay que verla desde un ángulo: por eso cada keyframe
+     combina el giro (rotateZ, el que cambia) con una inclinación
+     fija en X (rotateX(22deg), constante).
+
+     El ORDEN importa: acá va rotateZ primero (izquierda) y rotateX
+     después (derecha). En CSS, la transformación de más a la
+     derecha se aplica primero sobre el objeto — así que primero se
+     inclina 22° (rotateX, fijo) y RECIÉN DESPUÉS ese disco ya
+     inclinado gira sobre el eje Z de la pantalla. El resultado es
+     que la silueta elíptica completa "tumba" al girar (como una
+     moneda real cayendo/girando), en vez de quedar una elipse fija
+     con el dibujo rotando adentro (que se ve mucho más plano). */
+  @keyframes spin-z {
+    from {
+      transform: rotate3d(0, 1, 0, 0deg);
+    }
+
+    to {
+      transform: rotate3d(0, 1, 0, 360deg);
+    }
+  }
+
+  .metal-plate {
+    transform-style: preserve-3d;
+    animation: spin-z 8s linear infinite;
+  }
+
+  /* En hover el giro se PAUSA (no se detiene en seco a 0°): queda
+     congelado en el ángulo donde iba y retoma desde ahí al soltar. */
+  .tilt-wrapper[data-state='hover'] .metal-plate {
+    animation-play-state: paused;
+  }
+
   /* Base: mantiene el color original del logo, solo le sube un poco
      el contraste/saturación y agrega un bisel con drop-shadow
      claro/oscuro para dar volumen, como si estuviera grabado en
@@ -78,22 +121,36 @@ const { class: className = '' } = Astro.props
     );
     mix-blend-mode: soft-light;
   }
+
+  /* En reposo (sin mouse encima) el brillo queda en un punto FIJO,
+     descentrado. Como quien gira es .metal-plate (padre de esta capa
+     también), ese punto fijo "recorre" la superficie del logo solo,
+     gracias al giro — no hace falta animar --mx/--my a mano. Esta
+     regla, al estar declarada sobre el propio elemento, gana por
+     sobre cualquier --mx/--my heredado desde .tilt-card. */
+  .tilt-wrapper[data-state='idle'] .metal-plate-sheen {
+    --mx: 28%;
+    --my: 22%;
+    opacity: 0.85;
+  }
 </style>
 
 <script>
   function initTilt(wrapper: HTMLElement) {
     const card = wrapper.querySelector<HTMLElement>('[data-tilt-card]')
-    // Ahora el brillo solo vive en el SVG (metal-sheen), ya no hay
-    // una capa de glare para toda la card.
     const shineLayers = wrapper.querySelectorAll<HTMLElement>('[data-metal-sheen]')
     if (!card || shineLayers.length === 0) return
 
     let isTouching = false
     const MAX_TILT = 16 // grados máximos de inclinación
 
-    const setShineOpacity = (value: number) => {
+    const setShineOpacity = (value: number | null) => {
       shineLayers.forEach((layer) => {
-        layer.style.opacity = String(value)
+        if (value === null) {
+          layer.style.removeProperty('opacity')
+        } else {
+          layer.style.opacity = String(value)
+        }
       })
     }
 
@@ -102,7 +159,6 @@ const { class: className = '' } = Astro.props
       const centerX = rect.left + rect.width / 2
       const centerY = rect.top + rect.height / 2
 
-      // Posición relativa (-1 a 1) respecto al centro de la tarjeta
       const relX = (clientX - centerX) / (rect.width / 2)
       const relY = (clientY - centerY) / (rect.height / 2)
 
@@ -111,20 +167,12 @@ const { class: className = '' } = Astro.props
 
       card.style.transform = `rotateY(${deltaX}deg) rotateX(${-deltaY}deg)`
 
-      // Posición del puntero dentro de la tarjeta, en %.
       const px = ((clientX - rect.left) / rect.width) * 100
       const py = ((clientY - rect.top) / rect.height) * 100
 
-      // El foco de luz se posiciona en el lado OPUESTO al puntero.
-      // Físicamente tiene más sentido: al inclinar la superficie
-      // hacia un lado, el reflejo de la luz se corre hacia el lado
-      // contrario (como el brillo de una moneda al girarla), en vez
-      // de quedar pegado al cursor, que se siente más artificial.
       const glareX = 100 - px
       const glareY = 100 - py
 
-      // Se setea en .tilt-card (el ancestro) para que --mx/--my
-      // cascadeen hacia la capa de brillo del logo.
       card.style.setProperty('--mx', `${glareX}%`)
       card.style.setProperty('--my', `${glareY}%`)
     }
@@ -132,13 +180,17 @@ const { class: className = '' } = Astro.props
     const resetTilt = () => {
       card.dataset.tracking = 'false'
       card.style.transform = 'rotateY(0deg) rotateX(0deg)'
-      setShineOpacity(0)
+      wrapper.dataset.state = 'idle'
+      // null = "sacar el opacity inline", para que vuelva a mandar
+      // la regla CSS de reposo ([data-state='idle'] .metal-plate-sheen)
+      // en vez de quedar pegado en el último valor que puso el hover.
+      setShineOpacity(null)
     }
 
-    // --- Mouse ---
     card.addEventListener('mouseenter', () => {
       if (isTouching) return
       card.dataset.tracking = 'true'
+      wrapper.dataset.state = 'hover'
       setShineOpacity(1)
     })
 
@@ -152,12 +204,12 @@ const { class: className = '' } = Astro.props
       resetTilt()
     })
 
-    // --- Touch ---
     card.addEventListener(
       'touchstart',
       (event) => {
         isTouching = true
         card.dataset.tracking = 'true'
+        wrapper.dataset.state = 'hover'
         setShineOpacity(1)
         const touch = event.touches[0]
         applyTilt(touch.clientX, touch.clientY)
